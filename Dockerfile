@@ -38,7 +38,11 @@ RUN npm ci
 
 # Pre-download Remotion's Chrome headless shell during the build so it is
 # cached in the image and does not need to be fetched at render time.
-RUN npx remotion browser ensure
+# Uses @remotion/renderer's API directly — no @remotion/cli needed.
+RUN node --input-type=module -e "\
+  import { ensureBrowser } from '@remotion/renderer'; \
+  await ensureBrowser(); \
+  console.log('Remotion browser ready.');"
 
 # ── Build Next.js ─────────────────────────────────────────────────────────────
 COPY . .
