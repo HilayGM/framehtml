@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcups2 \
     libdrm2 \
     libgbm1 \
-    libasound2t64 \
     libxrandr2 \
     libxkbcommon0 \
     libxfixes3 \
