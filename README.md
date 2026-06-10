@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+<p align="center">
+  <img src="public/title.svg" alt="REMOTION studio" width="100%"/>
+</p>
 
-## Getting Started
+<p align="center">
+  Escribe animaciones React, visualiza en tiempo real, exporta MP4.
+</p>
 
-First, run the development server:
+---
+
+## Uso rápido
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abre [http://localhost:3000](http://localhost:3000) — la landing te lleva al estudio en `/studio`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Stack
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Capa | Tecnología |
+|------|-----------|
+| Framework | Next.js 16 (App Router + Turbopack) |
+| Animaciones | Remotion 4 |
+| Editor | Monaco Editor |
+| Transpilación en browser | `@babel/standalone` |
+| Estilos | Tailwind CSS 4 |
 
-## Learn More
+## Estructura
 
-To learn more about Next.js, take a look at the following resources:
+```
+src/
+├── app/
+│   ├── page.tsx          # Landing
+│   ├── studio/page.tsx   # Editor + Player en tiempo real
+│   └── api/render/       # Endpoint de renderizado MP4
+└── remotion/
+    └── templates.ts      # Animación de ejemplo
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Renderizado MP4
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+El endpoint `/api/render` usa `@remotion/renderer` (requiere Chromium).  
+En Vercel (serverless) devuelve `501` con instrucciones. Para render real:
 
-## Deploy on Vercel
+- **Local** → `npm run dev` y usa el botón *Descargar MP4*
+- **Railway / Fly.io / Render** → despliega con el `Dockerfile` incluido
+- **AWS** → Remotion Lambda
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Deploy con Docker
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+docker build -t remotion-studio .
+docker run -p 3000:3000 remotion-studio
+```
+
+El `Dockerfile` instala las dependencias de sistema de Chrome headless y pre-descarga el binario de Remotion durante el build.
+
+---
+
+<p align="center">
+  Hecho por <a href="https://github.com/HilayGM">HilayGM</a>
+</p>
