@@ -21,20 +21,23 @@ const Player = dynamic(
   { ssr: false }
 );
 
-// ─── Prompt template ─────────────────────────────────────────────────────────
+// ─── Prompt template (dynamic — reflects current settings) ───────────────────
 
-const PROMPT = `Genera una animación para Remotion. Sigue TODAS estas reglas:
-
-• Solo importa desde 'remotion': useCurrentFrame, interpolate, AbsoluteFill, random…
-• Un único export default: export default function MiAnimacion() { ... }
-• Usa AbsoluteFill como elemento raíz para llenar el frame completo
-• Sin TypeScript (sin tipos, interfaces, ni anotaciones de tipo)
-• Sin template literals: usa  'rotate(' + x + 'deg)'  NO  \`rotate(\${x}deg)\`
-• Todos los estilos son inline: style={{ color: 'red', fontSize: 40 }}
-• Elementos visibles desde el frame 0 (no empieces todo invisible)
-• Canvas 1280×720 · 30 fps · 150 frames (5 segundos)
-
-Animación que quiero: `;
+function getPrompt(s: CompositionSettings): string {
+  const secs = (s.durationInFrames / s.fps).toFixed(1);
+  return (
+    "Genera una animación para Remotion. Sigue TODAS estas reglas:\n\n" +
+    "• Solo importa desde 'remotion': useCurrentFrame, interpolate, AbsoluteFill, random…\n" +
+    "• Un único export default: export default function MiAnimacion() { ... }\n" +
+    "• Usa AbsoluteFill como elemento raíz para llenar el frame completo\n" +
+    "• Sin TypeScript (sin tipos, interfaces, ni anotaciones de tipo)\n" +
+    "• Sin template literals: usa  'rotate(' + x + 'deg)'  NO  `rotate(${x}deg)`\n" +
+    "• Todos los estilos son inline: style={{ color: 'red', fontSize: 40 }}\n" +
+    "• Elementos visibles desde el frame 0 (no empieces todo invisible)\n" +
+    "• Canvas " + s.width + "×" + s.height + " · " + s.fps + " fps · " + s.durationInFrames + " frames (" + secs + " segundos)\n\n" +
+    "Animación que quiero: "
+  );
+}
 
 // ─── AI providers ─────────────────────────────────────────────────────────────
 
@@ -268,7 +271,7 @@ export default function Home() {
   };
 
   const copyPrompt = () => {
-    navigator.clipboard.writeText(PROMPT).then(() => {
+    navigator.clipboard.writeText(getPrompt(settings)).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
@@ -290,8 +293,23 @@ export default function Home() {
         </div>
 
         <div style={s.settingsRow}>
+          {/* Duration in seconds — converts to durationInFrames internally */}
+          <label style={s.settingLabel}>
+            <span style={s.settingText}>Seg</span>
+            <input
+              type="number"
+              value={parseFloat((settings.durationInFrames / settings.fps).toFixed(2))}
+              min="1" max="600" step="1"
+              onChange={(e) => {
+                const sec = parseFloat(e.target.value);
+                if (!isNaN(sec) && sec >= 1) {
+                  setSettings((p) => ({ ...p, durationInFrames: Math.round(sec * p.fps) }));
+                }
+              }}
+              style={{ ...s.settingInput, width: 60 }}
+            />
+          </label>
           {([
-            { label: "Frames", key: "durationInFrames", min: 1, max: 3000, w: 68 },
             { label: "FPS", key: "fps", min: 1, max: 120, w: 46 },
             { label: "W", key: "width", min: 100, max: 3840, w: 64 },
             { label: "H", key: "height", min: 100, max: 2160, w: 64 },
@@ -387,6 +405,7 @@ export default function Home() {
                       compositionHeight={settings.height}
                       style={{ width: previewW, height: previewH }}
                       controls loop autoPlay
+                      acknowledgeRemotionLicense
                     />
                   </div>
                 </PlayerBoundary>
@@ -416,7 +435,7 @@ export default function Home() {
               </button>
             </div>
 
-            <pre style={s.promptText}>{PROMPT}</pre>
+            <pre style={s.promptText}>{getPrompt(settings)}</pre>
 
             <div style={s.aiRow}>
               <span style={s.aiLabel}>Pedir animación en:</span>
