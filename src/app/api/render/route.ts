@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { bundle } from "@remotion/bundler";
-import { renderMedia, selectComposition } from "@remotion/renderer";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -8,25 +6,27 @@ import crypto from "crypto";
 
 export const maxDuration = 300;
 
+const VERCEL_MSG =
+  "El renderizado MP4 requiere Chromium + ffmpeg en el servidor.\n" +
+  "Vercel (serverless) no los incluye, por lo que esta función no está disponible en la demo.\n\n" +
+  "Para renderizar, tienes tres opciones:\n" +
+  "  1. Ejecuta el proyecto localmente:  npm run dev\n" +
+  "  2. Despliega en Railway, Fly.io o Render.com (soportan Node.js completo)\n" +
+  "  3. Configura Remotion Lambda en AWS (renderizado en la nube)";
+
 export async function POST(req: NextRequest) {
-  // Vercel serverless has no bundled Chromium or ffmpeg — rendering is impossible.
+  // Guard first — before any heavy imports — so Vercel never loads
+  // @remotion/bundler or @remotion/renderer (they require native binaries
+  // that don't exist in serverless and crash the function on import).
   if (process.env.VERCEL) {
-    return NextResponse.json(
-      {
-        error:
-          "El renderizado MP4 requiere Chromium + ffmpeg en el servidor.\n" +
-          "Vercel (serverless) no los incluye, por lo que esta función no está disponible en la demo.\n\n" +
-          "Para renderizar, tienes tres opciones:\n" +
-          "  1. Ejecuta el proyecto localmente:  npm run dev\n" +
-          "  2. Despliega en Railway, Fly.io o Render.com (soportan Node.js completo)\n" +
-          "  3. Configura Remotion Lambda en AWS (renderizado en la nube)",
-      },
-      { status: 501 }
-    );
+    return NextResponse.json({ error: VERCEL_MSG }, { status: 501 });
   }
 
+  // Dynamic imports: only executed locally where the binaries exist.
+  const { bundle } = await import("@remotion/bundler");
+  const { renderMedia, selectComposition } = await import("@remotion/renderer");
+
   const id = crypto.randomBytes(8).toString("hex");
-  // Use the OS temp dir (/tmp on Linux) — process.cwd() may be read-only.
   const compDir = path.join(os.tmpdir(), `remotion-${id}`);
   let outputPath: string | null = null;
 
