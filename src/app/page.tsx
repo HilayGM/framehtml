@@ -1,577 +1,150 @@
-"use client";
+import Link from "next/link";
 
-import React, {
-  useState, useCallback, useEffect,
-  ComponentType, Component,
-} from "react";
-import dynamic from "next/dynamic";
-import { MONEY_RAIN_TEMPLATE } from "@/remotion/templates";
-
-// ─── Dynamic imports (browser-only) ──────────────────────────────────────────
-
-const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
-  ssr: false,
-  loading: () => (
-    <div style={s.editorLoading}>Cargando editor…</div>
-  ),
-});
-
-const Player = dynamic(
-  () => import("@remotion/player").then((m) => m.Player),
-  { ssr: false }
-);
-
-// ─── Prompt template (dynamic — reflects current settings) ───────────────────
-
-function getPrompt(s: CompositionSettings): string {
-  const secs = (s.durationInFrames / s.fps).toFixed(1);
-  return (
-    "Genera una animación para Remotion. Sigue TODAS estas reglas:\n\n" +
-    "• Solo importa desde 'remotion': useCurrentFrame, interpolate, AbsoluteFill, random…\n" +
-    "• Un único export default: export default function MiAnimacion() { ... }\n" +
-    "• Usa AbsoluteFill como elemento raíz para llenar el frame completo\n" +
-    "• Sin TypeScript (sin tipos, interfaces, ni anotaciones de tipo)\n" +
-    "• Sin template literals: usa  'rotate(' + x + 'deg)'  NO  `rotate(${x}deg)`\n" +
-    "• Todos los estilos son inline: style={{ color: 'red', fontSize: 40 }}\n" +
-    "• Elementos visibles desde el frame 0 (no empieces todo invisible)\n" +
-    "• Canvas " + s.width + "×" + s.height + " · " + s.fps + " fps · " + s.durationInFrames + " frames (" + secs + " segundos)\n\n" +
-    "Animación que quiero: "
-  );
-}
-
-// ─── AI providers ─────────────────────────────────────────────────────────────
-
-const AI_PROVIDERS = [
-  {
-    name: "Claude",
-    url: "https://claude.ai",
-    bg: "linear-gradient(135deg,#c96442,#e8824a)",
-    icon: <ClaudeIcon />,
-  },
-  {
-    name: "ChatGPT",
-    url: "https://chat.openai.com",
-    bg: "linear-gradient(135deg,#10a37f,#1ac998)",
-    icon: <ChatGPTIcon />,
-  },
-  {
-    name: "Gemini",
-    url: "https://gemini.google.com",
-    bg: "linear-gradient(135deg,#4285f4,#a259ff)",
-    icon: <GeminiIcon />,
-  },
-];
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface CompositionSettings {
-  durationInFrames: number;
-  fps: number;
-  width: number;
-  height: number;
-}
-
-type RenderState = "idle" | "loading" | "error";
-
-// ─── Safe component wrapper ───────────────────────────────────────────────────
-// React 18 dev mode fires a synthetic window ErrorEvent for every error caught
-// by an error boundary, which triggers the Next.js overlay regardless.
-// We set this flag inside getDerivedStateFromError (synchronous, before the
-// window event fires) so our capture-phase listener can preventDefault() it.
-let _suppressNextWindowError = false;
-
-interface SafeState { runtimeError: string | null }
-
-function makeSafeComponent(
-  Inner: ComponentType<Record<string, unknown>>,
-  onError: (msg: string) => void,
-): ComponentType<Record<string, unknown>> {
-
-  class SafeWrapper extends Component<Record<string, unknown>, SafeState> {
-    state: SafeState = { runtimeError: null };
-
-    static getDerivedStateFromError(err: unknown): SafeState {
-      _suppressNextWindowError = true; // arm the window-level suppressor
-      return { runtimeError: err instanceof Error ? err.message : String(err) };
-    }
-
-    componentDidCatch(err: Error) {
-      onError(err.message ?? String(err));
-    }
-
-    render() {
-      if (this.state.runtimeError) return null;
-      return React.createElement(Inner, this.props);
-    }
-  }
-
-  (SafeWrapper as unknown as { displayName: string }).displayName =
-    `Safe(${(Inner as { displayName?: string; name?: string }).displayName ?? (Inner as { name?: string }).name ?? "Animation"})`;
-  return SafeWrapper as unknown as ComponentType<Record<string, unknown>>;
-}
-
-// ─── useCompiledComponent hook ────────────────────────────────────────────────
-
-function useCompiledComponent(code: string) {
-  const [component, setComponent] = useState<ComponentType<Record<string, unknown>> | null>(null);
-  const [compileError, setCompileError] = useState<string | null>(null);
-  const [isCompiling, setIsCompiling] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      if (cancelled || !code.trim()) return;
-      setIsCompiling(true);
-      setCompileError(null);
-
-      try {
-        const Babel = await import("@babel/standalone");
-        const result = Babel.transform(code, {
-          filename: "animation.tsx",
-          presets: [["react", { runtime: "classic" }], ["typescript"]],
-          plugins: [["transform-modules-commonjs", { strict: false }]],
-        });
-        if (!result.code) throw new Error("Babel no devolvió código");
-
-        const remotionExports = await import("remotion");
-        const reactExports = await import("react");
-        const ReactNS = (reactExports as unknown as { default: typeof React }).default ?? reactExports;
-
-        const origInterpolate = remotionExports.interpolate as (
-          input: number,
-          inputRange: number[],
-          outputRange: number[],
-          options?: unknown,
-        ) => number;
-
-        // Never throw — report the error as a deferred state update so React's
-        // render cycle never sees an exception and the dev overlay never fires.
-        let hasReportedInterpolateError = false;
-        const safeInterpolate = (
-          input: number,
-          inputRange: number[],
-          outputRange: number[],
-          options?: unknown,
-        ): number => {
-          for (let i = 1; i < inputRange.length; i++) {
-            if (inputRange[i] <= inputRange[i - 1]) {
-              if (!hasReportedInterpolateError) {
-                hasReportedInterpolateError = true;
-                const msg =
-                  `interpolate: el inputRange debe ser ascendente (de menor a mayor).\n` +
-                  `Recibido: [${inputRange.join(", ")}]\n` +
-                  `Correcto: [${[...inputRange].sort((a, b) => a - b).join(", ")}]`;
-                setTimeout(() => {
-                  if (!cancelled) { setCompileError(msg); setComponent(null); }
-                }, 0);
-              }
-              return (outputRange as number[])[0] ?? 0; // safe fallback
-            }
-          }
-          return origInterpolate(input, inputRange, outputRange, options);
-        };
-
-        const fakeRequire = (name: string): unknown => {
-          if (name === "remotion") return { ...remotionExports, interpolate: safeInterpolate };
-          if (name === "react") return ReactNS;
-          throw new Error(`"${name}" no disponible. Solo "remotion" y "react".`);
-        };
-
-        const mod: { exports: Record<string, unknown> } = { exports: {} };
-        // eslint-disable-next-line no-new-func
-        new Function("require", "module", "exports", "React", result.code)(
-          fakeRequire, mod, mod.exports, ReactNS
-        );
-
-        const exported = mod.exports.default;
-        if (typeof exported !== "function") {
-          throw new Error('Necesitas:\n  export default function NombreAnimacion() { ... }');
-        }
-
-        // Wrap in a SafeComponent that catches render errors and surfaces them
-        // as compile-time errors so the Next.js dev overlay never fires.
-        const UserComp = exported as ComponentType<Record<string, unknown>>;
-        const safe = makeSafeComponent(UserComp, (msg) => {
-          if (!cancelled) {
-            setCompileError(msg);
-            setComponent(null);
-          }
-        });
-
-        if (!cancelled) setComponent(() => safe);
-      } catch (err) {
-        if (!cancelled) { setCompileError(err instanceof Error ? err.message : String(err)); setComponent(null); }
-      } finally {
-        if (!cancelled) setIsCompiling(false);
-      }
-    }, 600);
-
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [code]);
-
-  return { component, compileError, isCompiling };
-}
-
-// ─── Main page ────────────────────────────────────────────────────────────────
-
-export default function Home() {
-  const [code, setCode] = useState(MONEY_RAIN_TEMPLATE);
-  const [settings, setSettings] = useState<CompositionSettings>({
-    durationInFrames: 150, fps: 30, width: 1280, height: 720,
-  });
-  const [renderState, setRenderState] = useState<RenderState>("idle");
-  const [renderError, setRenderError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
-  const { component, compileError, isCompiling } = useCompiledComponent(code);
-
-  // Suppress the synthetic window ErrorEvent that React 18 fires in dev mode
-  // for errors caught by error boundaries — prevents the Next.js overlay.
-  useEffect(() => {
-    const handler = (e: ErrorEvent) => {
-      if (_suppressNextWindowError) {
-        _suppressNextWindowError = false;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-      }
-    };
-    window.addEventListener("error", handler, true); // capture phase = runs first
-    return () => window.removeEventListener("error", handler, true);
-  }, []);
-
-  const handleDownload = useCallback(async () => {
-    setRenderState("loading");
-    setRenderError(null);
-    try {
-      const res = await fetch("/api/render", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, ...settings }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(data.error ?? "Error en el servidor");
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = "animacion.mp4";
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-      setRenderState("idle");
-    } catch (err) {
-      setRenderError(err instanceof Error ? err.message : "Error desconocido");
-      setRenderState("error");
-    }
-  }, [code, settings]);
-
-  const setSetting = <K extends keyof CompositionSettings>(key: K, raw: string) => {
-    const v = parseInt(raw, 10);
-    if (!isNaN(v) && v > 0) setSettings((p) => ({ ...p, [key]: v }));
-  };
-
-  const copyPrompt = () => {
-    navigator.clipboard.writeText(getPrompt(settings)).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  const previewW = 520;
-  const previewH = Math.round(previewW * settings.height / settings.width);
-  const canDownload = renderState !== "loading" && !compileError && !!component;
-
+export default function Landing() {
   return (
     <div style={s.root}>
+      {/* Gradient orbs */}
+      <div style={s.orb1} />
+      <div style={s.orb2} />
 
-      {/* ── Header ──────────────────────────────────────────────────────── */}
-      <header style={s.header}>
-        <div style={s.headerLeft}>
-          <span style={s.logo}>
-            <LogoIcon /> Remotion Studio
-          </span>
+      {/* ── Nav ─────────────────────────────────────────────────────────── */}
+      <nav style={s.nav}>
+        <div style={s.navLogo}>
+          <svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+            <rect x="3" y="3" width="18" height="18" rx="3" stroke="#c96442" strokeWidth="1.5"/>
+            <circle cx="9" cy="12" r="2" fill="#c96442"/>
+            <path d="M13 10l4 2-4 2" stroke="#c96442" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          FrameHTML
+        </div>
+        <Link href="/studio" style={s.navBtn}>
+          Abrir Studio →
+        </Link>
+      </nav>
+
+      {/* ── Hero ────────────────────────────────────────────────────────── */}
+      <main style={s.main}>
+
+        {/* Badge */}
+        <div style={s.badge}>
+          <svg width={10} height={10} viewBox="0 0 10 10" fill="#e8824a">
+            <polygon points="5,0 6.5,3.5 10,3.8 7.5,6.2 8.2,10 5,8 1.8,10 2.5,6.2 0,3.8 3.5,3.5"/>
+          </svg>
+          Powered by Remotion
         </div>
 
-        <div style={s.settingsRow}>
-          {/* Duration in seconds — converts to durationInFrames internally */}
-          <label style={s.settingLabel}>
-            <span style={s.settingText}>Seg</span>
-            <input
-              type="number"
-              value={parseFloat((settings.durationInFrames / settings.fps).toFixed(2))}
-              min="1" max="600" step="1"
-              onChange={(e) => {
-                const sec = parseFloat(e.target.value);
-                if (!isNaN(sec) && sec >= 1) {
-                  setSettings((p) => ({ ...p, durationInFrames: Math.round(sec * p.fps) }));
-                }
-              }}
-              style={{ ...s.settingInput, width: 60 }}
-            />
-          </label>
-          {([
-            { label: "FPS", key: "fps", min: 1, max: 120, w: 46 },
-            { label: "W", key: "width", min: 100, max: 3840, w: 64 },
-            { label: "H", key: "height", min: 100, max: 2160, w: 64 },
-          ] as const).map(({ label, key, min, max, w }) => (
-            <label key={key} style={s.settingLabel}>
-              <span style={s.settingText}>{label}</span>
-              <input
-                type="number"
-                value={settings[key]}
-                min={min} max={max}
-                onChange={(e) => setSetting(key, e.target.value)}
-                style={{ ...s.settingInput, width: w }}
-              />
-            </label>
+        {/* Heading */}
+        <h1 style={s.h1}>
+          De Remotion a{" "}
+          <span style={s.accent}>MP4</span>
+          {" "}en segundos
+        </h1>
+
+        {/* Subtitle */}
+        <p style={s.subtitle}>
+          Escribe animaciones React con Remotion, ve el resultado en tiempo real y
+          exporta tu video — todo desde el navegador.
+        </p>
+
+        {/* CTA */}
+        <Link href="/studio" style={s.cta}>
+          Abrir Remotion Studio
+          <svg width={18} height={18} viewBox="0 0 24 24" fill="none" style={{ marginLeft: 8 }}>
+            <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </Link>
+
+        {/* Feature pills */}
+        <div style={s.pills}>
+          {[
+            { icon: "✏️", label: "Editor Monaco" },
+            { icon: "▶", label: "Preview en vivo" },
+            { icon: "🎬", label: "Export MP4" },
+            { icon: "🤖", label: "Prompts para IA" },
+          ].map((f) => (
+            <div key={f.label} style={s.pill}>
+              <span>{f.icon}</span>
+              {f.label}
+            </div>
           ))}
         </div>
 
-        <button
-          onClick={handleDownload}
-          disabled={!canDownload}
-          style={{ ...s.downloadBtn, opacity: canDownload ? 1 : 0.45, cursor: canDownload ? "pointer" : "not-allowed" }}
-        >
-          {renderState === "loading"
-            ? <><Spinner /> Renderizando…</>
-            : <><DownloadIcon /> Descargar MP4</>}
-        </button>
-      </header>
-
-      {/* ── Body ────────────────────────────────────────────────────────── */}
-      <div style={s.body}>
-
-        {/* Left — editor */}
-        <div style={s.editorPanel}>
-          <div style={s.panelBar}>
-            <TabIcon /><span style={{ marginLeft: 6 }}>animation.tsx</span>
-            <div style={{ flex: 1 }} />
-            {isCompiling && <Badge color="#f9e2af">⟳ compilando</Badge>}
-            {!isCompiling && !compileError && component && <Badge color="#a6e3a1">✓ listo</Badge>}
-            {!isCompiling && compileError && <Badge color="#f38ba8">✗ error</Badge>}
-          </div>
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <MonacoEditor
-              height="100%"
-              defaultLanguage="typescript"
-              theme="vs-dark"
-              value={code}
-              onChange={(v) => setCode(v ?? "")}
-              options={{
-                minimap: { enabled: false },
-                fontSize: 13,
-                lineNumbers: "on",
-                wordWrap: "on",
-                scrollBeyondLastLine: false,
-                padding: { top: 14, bottom: 14 },
-                tabSize: 2,
-                fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-              }}
-              beforeMount={(monaco) => {
-                monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
-                  noSemanticValidation: true, noSyntaxValidation: false,
-                });
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Right — preview + prompt */}
-        <div style={s.rightPanel}>
-
-          {/* Preview area */}
-          <div style={s.previewArea}>
-            <div style={s.panelBar}>
-              <PreviewIcon />
-              <span style={{ marginLeft: 6 }}>
-                Preview · {settings.width}×{settings.height} · {(settings.durationInFrames / settings.fps).toFixed(1)}s
-              </span>
-            </div>
-            <div style={s.previewContent}>
-              {compileError ? (
-                <div style={{ ...s.errorBox, maxWidth: previewW }}>
-                  <p style={s.errorTitle}>Error de compilación</p>
-                  <pre style={s.errorPre}>{compileError}</pre>
-                </div>
-              ) : component ? (
-                <PlayerBoundary resetKey={component} previewWidth={previewW} previewHeight={previewH}>
-                  <div style={s.playerShell}>
-                    <Player
-                      component={component}
-                      inputProps={{}}
-                      durationInFrames={settings.durationInFrames}
-                      fps={settings.fps}
-                      compositionWidth={settings.width}
-                      compositionHeight={settings.height}
-                      style={{ width: previewW, height: previewH }}
-                      controls loop autoPlay
-                      acknowledgeRemotionLicense
-                    />
-                  </div>
-                </PlayerBoundary>
-              ) : (
-                <div style={{ ...s.placeholder, width: previewW, height: Math.round(previewW * 9 / 16) }}>
-                  <SpinnerLg />
-                  <span style={{ marginTop: 12 }}>Compilando…</span>
-                </div>
-              )}
-              {renderState === "error" && renderError && (
-                <div style={{ ...s.errorBox, maxWidth: previewW, marginTop: 12 }}>
-                  <p style={s.errorTitle}>Error al renderizar</p>
-                  <pre style={s.errorPre}>{renderError}</pre>
-                </div>
-              )}
-            </div>
+        {/* App mockup */}
+        <div style={s.mockupWrap}>
+          {/* Browser chrome */}
+          <div style={s.mockupBar}>
+            <div style={s.dot} />
+            <div style={s.dot} />
+            <div style={s.dot} />
+            <div style={s.urlBar}>framehtml.vercel.app/studio</div>
           </div>
 
-          {/* Prompt for AI */}
-          <div style={s.promptCard}>
-            <div style={s.promptHeader}>
-              <div style={s.promptTitle}>
-                <AIIcon /> Prompt para IA
+          {/* Content */}
+          <div style={s.mockupBody}>
+            {/* Editor pane */}
+            <div style={s.editorPane}>
+              <div style={{ color: "#6272a4", marginBottom: 4 }}>{"// Animación Remotion"}</div>
+              <div>
+                <span style={{ color: "#cba6f7" }}>{"import "}</span>
+                <span style={{ color: "#89dceb" }}>{"{ useCurrentFrame, interpolate }"}</span>
               </div>
-              <button onClick={copyPrompt} style={{ ...s.copyBtn, ...(copied ? s.copyBtnSuccess : {}) }}>
-                {copied ? <><CheckIcon /> Copiado</> : <><CopyIcon /> Copiar prompt</>}
-              </button>
+              <div>
+                <span style={{ color: "#cba6f7" }}>{"  from "}</span>
+                <span style={{ color: "#a6e3a1" }}>{"'remotion'"}</span>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <span style={{ color: "#cba6f7" }}>{"export default "}</span>
+                <span style={{ color: "#89b4fa" }}>{"function "}</span>
+                <span style={{ color: "#f1fa8c" }}>{"MiAnimacion"}</span>
+                <span style={{ color: "#f8f8f2" }}>{"() {"}</span>
+              </div>
+              <div style={{ paddingLeft: 16, color: "#f8f8f2" }}>
+                {"const frame = "}
+                <span style={{ color: "#89dceb" }}>{"useCurrentFrame"}</span>
+                {"()"}
+              </div>
+              <div style={{ paddingLeft: 16, marginTop: 4, color: "#f8f8f2" }}>
+                <span style={{ color: "#cba6f7" }}>{"const "}</span>
+                {"opacity = "}
+                <span style={{ color: "#89dceb" }}>{"interpolate"}</span>
+              </div>
+              <div style={{ paddingLeft: 32, color: "#f8f8f2" }}>{"(frame, [0, 30], [0, 1])"}</div>
+              <div style={{ paddingLeft: 16, marginTop: 4 }}>
+                <span style={{ color: "#cba6f7" }}>{"return "}</span>
+                <span style={{ color: "#f38ba8" }}>{"<div"}</span>
+                <span style={{ color: "#f8f8f2" }}>{" style={{ opacity }}>"}</span>
+              </div>
+              <div style={{ paddingLeft: 32, color: "#a6e3a1" }}>{"💰 MONEY RAIN 💰"}</div>
+              <div style={{ paddingLeft: 16, color: "#f38ba8" }}>{"</div>"}</div>
+              <div style={{ color: "#f8f8f2" }}>{"}"}</div>
             </div>
 
-            <pre style={s.promptText}>{getPrompt(settings)}</pre>
-
-            <div style={s.aiRow}>
-              <span style={s.aiLabel}>Pedir animación en:</span>
-              <div style={s.aiBtns}>
-                {AI_PROVIDERS.map((p) => (
-                  <a
-                    key={p.name}
-                    href={p.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{ ...s.aiBtn, background: p.bg }}
-                    title={`Abrir ${p.name}`}
-                  >
-                    <span style={s.aiBtnIcon}>{p.icon}</span>
-                    <span style={s.aiBtnLabel}>{p.name}</span>
-                  </a>
-                ))}
-              </div>
+            {/* Preview pane */}
+            <div style={s.previewPane}>
+              {["💰", "💵", "💸", "🪙", "💴", "💶"].map((e, i) => (
+                <div key={i} style={{
+                  position: "absolute",
+                  left: (8 + i * 15) + "%",
+                  top: (6 + (i % 4) * 20) + "%",
+                  fontSize: 26 + (i % 3) * 8,
+                  opacity: 0.75,
+                  transform: "rotate(" + (i * 23 - 30) + "deg)",
+                }}>
+                  {e}
+                </div>
+              ))}
+              <div style={s.previewLabel}>💸 MONEY RAIN 💸</div>
             </div>
           </div>
         </div>
-      </div>
+      </main>
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
       <footer style={s.footer}>
-        <span>Remotion Studio · Next.js</span>
-        <span style={{ color: "#52525b" }}>
-          {settings.durationInFrames} frames · {settings.fps} fps · {settings.width}×{settings.height}
-        </span>
+        <span>FrameHTML · Remotion Studio</span>
+        <span>Hecho con Next.js + Remotion</span>
       </footer>
     </div>
-  );
-}
-
-// ─── Error Boundary ───────────────────────────────────────────────────────────
-
-interface BProps { children: React.ReactNode; resetKey: unknown; previewWidth: number; previewHeight: number }
-interface BState { error: string | null }
-
-class PlayerBoundary extends Component<BProps, BState> {
-  state: BState = { error: null };
-  static getDerivedStateFromError(err: unknown): BState {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
-  componentDidUpdate(prev: BProps) {
-    if (prev.resetKey !== this.props.resetKey && this.state.error) this.setState({ error: null });
-  }
-  render() {
-    if (this.state.error) return (
-      <div style={{ ...s.errorBox, width: this.props.previewWidth, minHeight: this.props.previewHeight, boxSizing: "border-box" }}>
-        <p style={s.errorTitle}>Error en tiempo de ejecución</p>
-        <pre style={s.errorPre}>{this.state.error}</pre>
-      </div>
-    );
-    return this.props.children;
-  }
-}
-
-// ─── Icons (inline SVG) ───────────────────────────────────────────────────────
-
-function LogoIcon() {
-  return (
-    <svg width={20} height={20} viewBox="0 0 24 24" fill="none" style={{ marginRight: 8 }}>
-      <rect x="3" y="3" width="18" height="18" rx="3" stroke="#c96442" strokeWidth="1.5"/>
-      <circle cx="9" cy="12" r="2" fill="#c96442"/>
-      <path d="M13 10l4 2-4 2" stroke="#c96442" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-    </svg>
-  );
-}
-function TabIcon() {
-  return <svg width={14} height={14} viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke="#52525b" strokeWidth="1.5"/><path d="M7 9h10M7 13h6" stroke="#52525b" strokeWidth="1.5" strokeLinecap="round"/></svg>;
-}
-function PreviewIcon() {
-  return <svg width={14} height={14} viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" stroke="#52525b" strokeWidth="1.5"/><path d="M10 8l6 4-6 4V8z" fill="#52525b"/></svg>;
-}
-function DownloadIcon() {
-  return <svg width={15} height={15} viewBox="0 0 24 24" fill="none" style={{ marginRight: 7 }}><path d="M12 3v12M7 11l5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d="M5 20h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>;
-}
-function AIIcon() {
-  return <svg width={15} height={15} viewBox="0 0 24 24" fill="none" style={{ marginRight: 6 }}><path d="M12 2l2 7h7l-5.5 4 2 7L12 16l-5.5 4 2-7L3 9h7L12 2z" fill="#c96442" opacity={0.9}/></svg>;
-}
-function CopyIcon() {
-  return <svg width={13} height={13} viewBox="0 0 24 24" fill="none" style={{ marginRight: 5 }}><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" stroke="currentColor" strokeWidth="1.5"/></svg>;
-}
-function CheckIcon() {
-  return <svg width={13} height={13} viewBox="0 0 24 24" fill="none" style={{ marginRight: 5 }}><path d="M5 13l4 4L19 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>;
-}
-function Spinner() {
-  return (
-    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" style={{ animation: "spin .8s linear infinite", marginRight: 7 }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" opacity={0.2}/>
-      <path fill="currentColor" opacity={0.8} d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
-    </svg>
-  );
-}
-function SpinnerLg() {
-  return (
-    <svg width={28} height={28} viewBox="0 0 24 24" fill="none" style={{ animation: "spin .9s linear infinite" }}>
-      <circle cx="12" cy="12" r="10" stroke="#3f3f46" strokeWidth="3"/>
-      <path fill="#c96442" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z"/>
-    </svg>
-  );
-}
-
-// ─── AI Brand icons ───────────────────────────────────────────────────────────
-
-function ClaudeIcon() {
-  return (
-    <svg width={18} height={18} viewBox="0 0 24 24" fill="none">
-      <path d="M12 2C10.5 6.5 9 9 6 11c3 2 4.5 4.5 6 10 1.5-5.5 3-8 6-10-3-2-4.5-4.5-6-9z" fill="white" opacity={0.9}/>
-    </svg>
-  );
-}
-function ChatGPTIcon() {
-  return (
-    <svg width={18} height={18} viewBox="0 0 24 24" fill="white" opacity={0.9}>
-      <path d="M22.28 9.82a5.98 5.98 0 00-.52-4.91 6.05 6.05 0 00-6.51-2.9A6.07 6.07 0 004.98 4.18a5.98 5.98 0 00-4 2.9 6.05 6.05 0 00.74 7.1 5.98 5.98 0 00.51 4.91 6.05 6.05 0 006.51 2.9A5.98 5.98 0 0013.26 24a6.06 6.06 0 005.77-4.21 5.99 5.99 0 004-2.9 6.06 6.06 0 00-.75-7.07zM13.26 22.43a4.48 4.48 0 01-2.88-1.04l.14-.08 4.78-2.76a.79.79 0 00.4-.68V11.2l2.02 1.17a.07.07 0 01.04.05v5.58a4.5 4.5 0 01-4.5 4.43zM3.6 18.3a4.47 4.47 0 01-.54-3.01l.14.08 4.78 2.76a.77.77 0 00.78 0l5.84-3.37v2.33a.08.08 0 01-.03.06l-4.83 2.79A4.5 4.5 0 013.6 18.3zM2.34 7.9a4.49 4.49 0 012.37-1.97v5.68a.77.77 0 00.39.68l5.81 3.35-2.02 1.17a.08.08 0 01-.07 0l-4.83-2.79A4.5 4.5 0 012.34 7.9zm16.6 3.86l-5.84-3.37 2.02-1.17a.08.08 0 01.07 0l4.83 2.79a4.49 4.49 0 01-.68 8.1v-5.67a.79.79 0 00-.4-.68zm2.01-3.02l-.14-.08-4.77-2.78a.78.78 0 00-.79 0L9.41 9.23V6.9a.07.07 0 01.03-.06l4.83-2.79a4.5 4.5 0 016.68 4.66zm-12.64 4.14l-2.02-1.16a.08.08 0 01-.04-.06V6.07a4.5 4.5 0 017.38-3.45l-.14.08-4.78 2.76a.79.79 0 00-.4.68v6.74zm1.1-2.37l2.6-1.5 2.6 1.5v3l-2.6 1.5-2.6-1.5V10.5z"/>
-    </svg>
-  );
-}
-function GeminiIcon() {
-  return (
-    <svg width={18} height={18} viewBox="0 0 24 24" fill="white" opacity={0.9}>
-      <path d="M12 2c-.5 3.7-1.8 6.4-3.8 8.2C6.2 12 3.5 13.3 0 13.8c3.5.5 6.2 1.8 8.2 3.6C10.2 19.2 11.5 21.9 12 26c.5-4.1 1.8-6.8 3.8-8.6 2-1.8 4.7-3.1 8.2-3.6-3.5-.5-6.2-1.8-8.2-3.6C13.8 8.4 12.5 5.7 12 2z"/>
-    </svg>
-  );
-}
-
-// ─── Small components ─────────────────────────────────────────────────────────
-
-function Badge({ color, children }: { color: string; children: React.ReactNode }) {
-  return (
-    <span style={{ fontSize: 10, color, background: color + "20", borderRadius: 4, padding: "2px 7px", fontWeight: 600, letterSpacing: "0.03em" }}>
-      {children}
-    </span>
   );
 }
 
@@ -579,169 +152,177 @@ function Badge({ color, children }: { color: string; children: React.ReactNode }
 
 const s: Record<string, React.CSSProperties> = {
   root: {
-    display: "flex", flexDirection: "column", height: "100vh",
-    background: "#09090b", color: "#e4e4e7",
+    background: "#09090b",
+    color: "#e4e4e7",
+    minHeight: "100vh",
+    display: "flex",
+    flexDirection: "column",
     fontFamily: "'Inter', system-ui, sans-serif",
     overflow: "hidden",
+    position: "relative",
+  },
+  orb1: {
+    position: "fixed",
+    top: "-15%", left: "35%",
+    width: 700, height: 700,
+    borderRadius: "50%",
+    background: "radial-gradient(circle, rgba(201,100,66,0.13) 0%, transparent 65%)",
+    pointerEvents: "none",
+  },
+  orb2: {
+    position: "fixed",
+    bottom: "-20%", right: "10%",
+    width: 500, height: 500,
+    borderRadius: "50%",
+    background: "radial-gradient(circle, rgba(80,60,200,0.09) 0%, transparent 65%)",
+    pointerEvents: "none",
   },
 
-  // Header
-  header: {
-    display: "flex", alignItems: "center", gap: 12,
-    padding: "0 20px", height: 52,
-    background: "#111113",
-    borderBottom: "1px solid #27272a",
-    flexShrink: 0,
+  // Nav
+  nav: {
+    position: "relative", zIndex: 10,
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    padding: "18px 40px",
+    borderBottom: "1px solid #18181b",
   },
-  headerLeft: { display: "flex", alignItems: "center", minWidth: 180 },
-  logo: {
-    display: "flex", alignItems: "center",
-    fontWeight: 700, fontSize: 15, color: "#fafafa",
-    letterSpacing: "-0.3px",
+  navLogo: {
+    display: "flex", alignItems: "center", gap: 10,
+    fontWeight: 800, fontSize: 16, color: "#fafafa",
+    letterSpacing: "-0.4px",
   },
-  settingsRow: {
-    display: "flex", alignItems: "center", gap: 10, flex: 1,
-    justifyContent: "center",
-  },
-  settingLabel: {
-    display: "flex", alignItems: "center", gap: 5, fontSize: 11,
-    color: "#a1a1aa",
-  },
-  settingText: { fontWeight: 500 },
-  settingInput: {
-    background: "#1c1c1f",
+  navBtn: {
+    background: "transparent",
     border: "1px solid #3f3f46",
-    borderRadius: 6, color: "#e4e4e7",
-    padding: "3px 7px", fontSize: 12,
-    outline: "none",
-  },
-  downloadBtn: {
-    display: "flex", alignItems: "center",
-    background: "linear-gradient(135deg,#c96442,#e8824a)",
-    color: "#fff", border: "none", borderRadius: 8,
-    padding: "7px 16px", fontWeight: 700, fontSize: 13,
-    transition: "opacity .15s", whiteSpace: "nowrap",
-    boxShadow: "0 2px 12px rgba(201,100,66,0.35)",
+    borderRadius: 8,
+    padding: "7px 16px",
+    color: "#a1a1aa",
+    fontSize: 13, fontWeight: 600,
+    textDecoration: "none",
   },
 
-  // Body
-  body: { display: "flex", flex: 1, overflow: "hidden" },
-
-  // Editor panel
-  editorPanel: {
-    width: "54%", display: "flex", flexDirection: "column",
-    borderRight: "1px solid #27272a", overflow: "hidden",
-  },
-  editorLoading: {
-    flex: 1, background: "#1e1e1e",
-    display: "flex", alignItems: "center", justifyContent: "center",
-    color: "#52525b", fontSize: 13,
-  },
-
-  // Right panel
-  rightPanel: {
-    flex: 1, display: "flex", flexDirection: "column", overflow: "hidden",
-    background: "#0d0d10",
-  },
-  previewArea: {
-    flex: 1, display: "flex", flexDirection: "column",
-    borderBottom: "1px solid #27272a", overflow: "hidden", minHeight: 0,
-  },
-  previewContent: {
-    flex: 1, display: "flex", flexDirection: "column",
-    alignItems: "center", justifyContent: "center",
-    padding: 20, overflowY: "auto", gap: 10,
-  },
-  playerShell: {
-    borderRadius: 10, overflow: "hidden",
-    boxShadow: "0 0 0 1px #27272a, 0 16px 48px rgba(0,0,0,.7)",
-  },
-  placeholder: {
+  // Hero
+  main: {
+    position: "relative", zIndex: 1,
+    flex: 1,
     display: "flex", flexDirection: "column",
     alignItems: "center", justifyContent: "center",
-    background: "#111113", borderRadius: 10,
-    border: "1px dashed #3f3f46", color: "#52525b", fontSize: 12,
+    padding: "60px 20px 80px",
+    textAlign: "center",
   },
-
-  // Panel bar
-  panelBar: {
-    display: "flex", alignItems: "center",
-    padding: "0 14px", height: 36,
-    background: "#111113", borderBottom: "1px solid #27272a",
-    fontSize: 12, color: "#71717a", gap: 0, flexShrink: 0,
+  badge: {
+    display: "inline-flex", alignItems: "center", gap: 7,
+    background: "rgba(201,100,66,0.12)",
+    border: "1px solid rgba(201,100,66,0.3)",
+    borderRadius: 100, padding: "5px 14px",
+    marginBottom: 32,
+    fontSize: 12, color: "#e8824a", fontWeight: 600,
+    letterSpacing: "0.02em",
   },
-
-  // Prompt card
-  promptCard: {
-    flexShrink: 0,
-    background: "#111113",
-    borderTop: "1px solid #27272a",
-    padding: "14px 18px 16px",
+  h1: {
+    fontSize: "clamp(36px, 6.5vw, 76px)",
+    fontWeight: 900,
+    lineHeight: 1.06,
+    letterSpacing: "-3px",
+    margin: "0 0 22px",
+    color: "#fafafa",
+    maxWidth: 820,
   },
-  promptHeader: {
-    display: "flex", alignItems: "center",
-    justifyContent: "space-between", marginBottom: 10,
+  accent: {
+    background: "linear-gradient(135deg, #c96442 20%, #e8824a 80%)",
+    WebkitBackgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+    backgroundClip: "text",
   },
-  promptTitle: {
-    display: "flex", alignItems: "center",
-    fontSize: 13, fontWeight: 700, color: "#e4e4e7",
+  subtitle: {
+    fontSize: "clamp(15px, 1.8vw, 18px)",
+    color: "#71717a",
+    maxWidth: 520,
+    lineHeight: 1.7,
+    margin: "0 0 44px",
   },
-  promptText: {
-    fontSize: 11, lineHeight: 1.65,
-    color: "#a1a1aa",
-    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-    background: "#0d0d10",
-    border: "1px solid #27272a",
-    borderRadius: 8, padding: "10px 14px",
-    whiteSpace: "pre-wrap", margin: "0 0 12px",
-    maxHeight: 148, overflowY: "auto",
+  cta: {
+    display: "inline-flex", alignItems: "center",
+    background: "linear-gradient(135deg, #c96442, #e8824a)",
+    color: "#fff",
+    borderRadius: 12,
+    padding: "15px 34px",
+    fontSize: 16, fontWeight: 800,
+    textDecoration: "none",
+    boxShadow: "0 4px 40px rgba(201,100,66,0.4)",
+    letterSpacing: "-0.3px",
+    marginBottom: 40,
   },
-  copyBtn: {
-    display: "flex", alignItems: "center",
-    background: "#1c1c1f", border: "1px solid #3f3f46",
-    borderRadius: 7, padding: "5px 12px",
-    fontSize: 12, fontWeight: 600, color: "#a1a1aa",
-    cursor: "pointer", transition: "all .15s",
+  pills: {
+    display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center",
+    marginBottom: 60,
   },
-  copyBtnSuccess: {
-    background: "#14532d22", border: "1px solid #16a34a",
-    color: "#4ade80",
-  },
-
-  // AI row
-  aiRow: {
-    display: "flex", alignItems: "center", gap: 12,
-  },
-  aiLabel: { fontSize: 11, color: "#52525b", whiteSpace: "nowrap" },
-  aiBtns: { display: "flex", gap: 8 },
-  aiBtn: {
+  pill: {
     display: "flex", alignItems: "center", gap: 7,
-    borderRadius: 8, padding: "7px 14px",
-    textDecoration: "none", color: "#fff",
-    fontSize: 12, fontWeight: 700,
-    boxShadow: "0 2px 8px rgba(0,0,0,.35)",
-    transition: "filter .15s, transform .1s",
+    background: "#111113", border: "1px solid #27272a",
+    borderRadius: 100, padding: "8px 16px",
+    fontSize: 13, color: "#a1a1aa",
   },
-  aiBtnIcon: { display: "flex", alignItems: "center" },
-  aiBtnLabel: { letterSpacing: "-0.2px" },
 
-  // Errors
-  errorBox: {
-    padding: "14px 18px", background: "#0d0d10",
-    border: "1px solid #7f1d1d", borderRadius: 10,
-    boxSizing: "border-box",
+  // Mockup
+  mockupWrap: {
+    width: "100%", maxWidth: 860,
+    background: "#111113",
+    border: "1px solid #27272a",
+    borderRadius: 14,
+    overflow: "hidden",
+    boxShadow: "0 32px 80px rgba(0,0,0,0.65)",
   },
-  errorTitle: { color: "#f87171", fontWeight: 700, margin: "0 0 8px", fontSize: 13 },
-  errorPre: {
-    color: "#fca5a5", fontSize: 11.5, whiteSpace: "pre-wrap",
-    margin: 0, fontFamily: "monospace", lineHeight: 1.55,
+  mockupBar: {
+    display: "flex", alignItems: "center", gap: 7,
+    background: "#0d0d10",
+    padding: "10px 16px",
+    borderBottom: "1px solid #27272a",
+  },
+  dot: {
+    width: 10, height: 10, borderRadius: "50%", background: "#3f3f46",
+  },
+  urlBar: {
+    marginLeft: 10, flex: 1,
+    background: "#1c1c1f", borderRadius: 6,
+    padding: "3px 12px",
+    fontSize: 11, color: "#52525b",
+    textAlign: "left",
+  },
+  mockupBody: {
+    display: "flex", height: 270,
+  },
+  editorPane: {
+    flex: 1,
+    background: "#1e1e1e",
+    padding: "16px 20px",
+    fontFamily: "'Fira Code', 'JetBrains Mono', monospace",
+    fontSize: 11.5,
+    color: "#f8f8f2",
+    lineHeight: 1.65,
+    borderRight: "1px solid #27272a",
+    overflow: "hidden",
+    textAlign: "left",
+  },
+  previewPane: {
+    width: 360,
+    background: "linear-gradient(160deg, #0f0c29 0%, #302b63 50%, #1a1a2e 100%)",
+    display: "flex",
+    alignItems: "center", justifyContent: "center",
+    position: "relative",
+    overflow: "hidden",
+  },
+  previewLabel: {
+    color: "#FFD700", fontWeight: 900, fontSize: 20,
+    textShadow: "0 0 24px rgba(255,215,0,0.7)",
+    zIndex: 1, letterSpacing: "-0.5px",
   },
 
   // Footer
   footer: {
-    display: "flex", justifyContent: "space-between",
-    padding: "4px 20px", background: "#111113",
-    borderTop: "1px solid #27272a",
-    fontSize: 11, color: "#3f3f46", flexShrink: 0,
+    position: "relative", zIndex: 1,
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "16px 40px",
+    borderTop: "1px solid #18181b",
+    fontSize: 12, color: "#52525b",
   },
 };
