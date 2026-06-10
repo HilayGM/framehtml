@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "FrameHTML — De Remotion a MP4",
+  title: "Remotion Studio",
   description:
     "Escribe animaciones React con Remotion, visualiza el resultado en tiempo real y exporta tu video como MP4 — todo desde el navegador.",
   icons: { icon: "/icon.svg" },

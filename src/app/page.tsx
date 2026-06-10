@@ -15,7 +15,7 @@ export default function Landing() {
             <circle cx="9" cy="12" r="2" fill="#c96442"/>
             <path d="M13 10l4 2-4 2" stroke="#c96442" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          FrameHTML
+          Remotion Studio
         </div>
         <Link href="/studio" style={s.navBtn}>
           Abrir Studio →
@@ -54,20 +54,6 @@ export default function Landing() {
           </svg>
         </Link>
 
-        {/* Feature pills */}
-        <div style={s.pills}>
-          {[
-            { icon: "✏️", label: "Editor Monaco" },
-            { icon: "▶", label: "Preview en vivo" },
-            { icon: "🎬", label: "Export MP4" },
-            { icon: "🤖", label: "Prompts para IA" },
-          ].map((f) => (
-            <div key={f.label} style={s.pill}>
-              <span>{f.icon}</span>
-              {f.label}
-            </div>
-          ))}
-        </div>
 
         {/* App mockup */}
         <div style={s.mockupWrap}>
@@ -76,7 +62,7 @@ export default function Landing() {
             <div style={s.dot} />
             <div style={s.dot} />
             <div style={s.dot} />
-            <div style={s.urlBar}>framehtml.vercel.app/studio</div>
+            <div style={s.urlBar}>RemotionStudio.com/studio</div>
           </div>
 
           {/* Content */}
@@ -141,7 +127,7 @@ export default function Landing() {
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
       <footer style={s.footer}>
-        <span>FrameHTML · Remotion Studio</span>
+        <span>HilayGM · Remotion Studio</span>
         <span>Hecho con Next.js + Remotion</span>
       </footer>
     </div>
